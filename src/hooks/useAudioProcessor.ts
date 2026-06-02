@@ -25,12 +25,27 @@ export interface AudioProcessorState {
   duration: number;
   currentTime: number;
   fileName: string | null;
+  hasLoadedFile: boolean;
+  fileSizeBytes: number | null;
+  fileType: string | null;
+  channelCount: number | null;
+  sampleRate: number | null;
+  dominantFrequency: number;
+  spectralCentroid: number;
+  spectralRolloff: number;
+  zeroCrossingRate: number;
+  crestDb: number;
+  rmsMinDb: number;
+  rmsAverageDb: number;
+  rmsMaxDb: number;
+  rmsSampleCount: number;
   error: string | null;
 }
 
 export interface AudioProcessorRefs {
   frequencyCanvasRef: RefObject<HTMLCanvasElement | null>;
   waveformCanvasRef: RefObject<HTMLCanvasElement | null>;
+  circularOscillatorCanvasRef: RefObject<HTMLCanvasElement | null>;
 }
 
 export interface AudioProcessorControls {
@@ -73,6 +88,17 @@ const MAX_DECIBELS = -12;
 const INITIAL_FILTER_FREQUENCY = 12_000;
 const INITIAL_GAIN = 0.85;
 const METER_FLOOR_DB = -96;
+const SETTINGS_STORAGE_KEY = "reson8.audio-settings";
+
+interface StoredAudioSettings {
+  inputMode?: AudioInputMode;
+  gain?: number;
+  filterType?: FilterMode;
+  filterFrequency?: number;
+  fileName?: string | null;
+  fileSizeBytes?: number | null;
+  fileType?: string | null;
+}
 
 function clamp(value: number, minimum: number, maximum: number) {
   return Math.min(maximum, Math.max(minimum, value));
@@ -204,6 +230,61 @@ function drawWaveform(canvas: HTMLCanvasElement, waveformData: AudioByteData) {
   canvasContext.stroke();
 }
 
+function drawCircularOscillator(canvas: HTMLCanvasElement, waveformData: AudioByteData) {
+  const canvasContext = canvas.getContext("2d");
+  if (!canvasContext) {
+    return;
+  }
+
+  const { width, height } = resizeCanvas(canvas);
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const radius = Math.min(width, height) * 0.34;
+  const modulationRadius = Math.min(width, height) * 0.16;
+
+  canvasContext.clearRect(0, 0, width, height);
+  canvasContext.fillStyle = "rgba(15, 23, 42, 0.58)";
+  canvasContext.fillRect(0, 0, width, height);
+
+  canvasContext.strokeStyle = "rgba(148, 163, 184, 0.14)";
+  canvasContext.lineWidth = 1;
+
+  for (let ringIndex = 1; ringIndex <= 3; ringIndex += 1) {
+    canvasContext.beginPath();
+    canvasContext.arc(centerX, centerY, (radius / 3) * ringIndex, 0, Math.PI * 2);
+    canvasContext.stroke();
+  }
+
+  canvasContext.beginPath();
+
+  for (let index = 0; index < waveformData.length; index += 1) {
+    const normalized = waveformData[index] / 128 - 1;
+    const angle = (index / waveformData.length) * Math.PI * 2 - Math.PI / 2;
+    const dynamicRadius = radius + normalized * modulationRadius;
+    const xPosition = centerX + Math.cos(angle) * dynamicRadius;
+    const yPosition = centerY + Math.sin(angle) * dynamicRadius;
+
+    if (index === 0) {
+      canvasContext.moveTo(xPosition, yPosition);
+    } else {
+      canvasContext.lineTo(xPosition, yPosition);
+    }
+  }
+
+  canvasContext.closePath();
+  canvasContext.strokeStyle = "#67e8f9";
+  canvasContext.lineWidth = Math.max(2, width * 0.006);
+  canvasContext.shadowBlur = 28;
+  canvasContext.shadowColor = "rgba(34, 211, 238, 0.58)";
+  canvasContext.stroke();
+  canvasContext.shadowBlur = 0;
+
+  canvasContext.beginPath();
+  canvasContext.arc(centerX, centerY, Math.max(4, width * 0.014), 0, Math.PI * 2);
+  canvasContext.fillStyle = "#a78bfa";
+  canvasContext.fill();
+}
+
 function calculateRmsDb(waveformData: AudioByteData) {
   let sumSquares = 0;
 
@@ -216,11 +297,196 @@ function calculateRmsDb(waveformData: AudioByteData) {
   return rms > 0 ? Math.max(METER_FLOOR_DB, 20 * Math.log10(rms)) : METER_FLOOR_DB;
 }
 
+function calculateCrestDb(waveformData: AudioByteData) {
+  let sumSquares = 0;
+  let peak = 0;
+
+  for (let index = 0; index < waveformData.length; index += 1) {
+    const centeredSample = Math.abs((waveformData[index] - 128) / 128);
+    peak = Math.max(peak, centeredSample);
+    sumSquares += centeredSample * centeredSample;
+  }
+
+  const rms = Math.sqrt(sumSquares / waveformData.length);
+
+  if (rms === 0 || peak === 0) {
+    return 0;
+  }
+
+  return 20 * Math.log10(peak / rms);
+}
+
+function calculateZeroCrossingRate(waveformData: AudioByteData) {
+  let crossings = 0;
+  let previousSample = waveformData[0] - 128;
+
+  for (let index = 1; index < waveformData.length; index += 1) {
+    const sample = waveformData[index] - 128;
+
+    if ((previousSample < 0 && sample >= 0) || (previousSample >= 0 && sample < 0)) {
+      crossings += 1;
+    }
+
+    previousSample = sample;
+  }
+
+  return waveformData.length > 1 ? crossings / (waveformData.length - 1) : 0;
+}
+
+function calculateFrequencyMetrics(frequencyData: AudioByteData, sampleRate: number) {
+  const binWidth = sampleRate / 2 / frequencyData.length;
+  let totalMagnitude = 0;
+  let weightedFrequency = 0;
+  let strongestMagnitude = 0;
+  let strongestIndex = 0;
+
+  for (let index = 1; index < frequencyData.length; index += 1) {
+    const magnitude = frequencyData[index];
+    const frequency = index * binWidth;
+
+    totalMagnitude += magnitude;
+    weightedFrequency += magnitude * frequency;
+
+    if (magnitude > strongestMagnitude) {
+      strongestMagnitude = magnitude;
+      strongestIndex = index;
+    }
+  }
+
+  if (totalMagnitude === 0) {
+    return {
+      dominantFrequency: 0,
+      spectralCentroid: 0,
+      spectralRolloff: 0,
+    };
+  }
+
+  let cumulativeMagnitude = 0;
+  let rolloffFrequency = 0;
+  const rolloffThreshold = totalMagnitude * 0.85;
+
+  for (let index = 1; index < frequencyData.length; index += 1) {
+    cumulativeMagnitude += frequencyData[index];
+
+    if (cumulativeMagnitude >= rolloffThreshold) {
+      rolloffFrequency = index * binWidth;
+      break;
+    }
+  }
+
+  return {
+    dominantFrequency: strongestIndex * binWidth,
+    spectralCentroid: totalMagnitude > 0 ? weightedFrequency / totalMagnitude : 0,
+    spectralRolloff: rolloffFrequency,
+  };
+}
+
+function readStoredAudioSettings(): StoredAudioSettings {
+  if (typeof window === "undefined") {
+    return {};
+  }
+
+  try {
+    const storedSettings = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
+
+    if (!storedSettings) {
+      return {};
+    }
+
+    const parsedSettings = JSON.parse(storedSettings) as StoredAudioSettings;
+
+    return {
+      inputMode:
+        parsedSettings.inputMode === "file" || parsedSettings.inputMode === "microphone"
+          ? parsedSettings.inputMode
+          : undefined,
+      gain:
+        typeof parsedSettings.gain === "number"
+          ? clamp(parsedSettings.gain, 0, 2)
+          : undefined,
+      filterType:
+        parsedSettings.filterType === "lowpass" || parsedSettings.filterType === "highpass"
+          ? parsedSettings.filterType
+          : undefined,
+      filterFrequency:
+        typeof parsedSettings.filterFrequency === "number"
+          ? clamp(parsedSettings.filterFrequency, 40, 18_000)
+          : undefined,
+      fileName:
+        typeof parsedSettings.fileName === "string" ? parsedSettings.fileName : null,
+      fileSizeBytes:
+        typeof parsedSettings.fileSizeBytes === "number" ? parsedSettings.fileSizeBytes : null,
+      fileType:
+        typeof parsedSettings.fileType === "string" ? parsedSettings.fileType : null,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function createInitialState(): AudioProcessorState {
+  const storedSettings = readStoredAudioSettings();
+
+  return {
+    inputMode: storedSettings.inputMode ?? "microphone",
+    isInitialized: false,
+    isPlaying: false,
+    isLoading: false,
+    levelDb: METER_FLOOR_DB,
+    peakDb: METER_FLOOR_DB,
+    gain: storedSettings.gain ?? INITIAL_GAIN,
+    filterType: storedSettings.filterType ?? "lowpass",
+    filterFrequency: storedSettings.filterFrequency ?? INITIAL_FILTER_FREQUENCY,
+    duration: 0,
+    currentTime: 0,
+    fileName: storedSettings.fileName ?? null,
+    hasLoadedFile: false,
+    fileSizeBytes: storedSettings.fileSizeBytes ?? null,
+    fileType: storedSettings.fileType ?? null,
+    channelCount: null,
+    sampleRate: null,
+    dominantFrequency: 0,
+    spectralCentroid: 0,
+    spectralRolloff: 0,
+    zeroCrossingRate: 0,
+    crestDb: 0,
+    rmsMinDb: METER_FLOOR_DB,
+    rmsAverageDb: METER_FLOOR_DB,
+    rmsMaxDb: METER_FLOOR_DB,
+    rmsSampleCount: 0,
+    error: null,
+  };
+}
+
+function writeStoredAudioSettings(state: AudioProcessorState) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(
+      SETTINGS_STORAGE_KEY,
+      JSON.stringify({
+        inputMode: state.inputMode,
+        gain: state.gain,
+        filterType: state.filterType,
+        filterFrequency: state.filterFrequency,
+        fileName: state.fileName,
+        fileSizeBytes: state.fileSizeBytes,
+        fileType: state.fileType,
+      } satisfies StoredAudioSettings),
+    );
+  } catch {
+    undefined;
+  }
+}
+
 export function useAudioProcessor(
   options: AudioProcessorOptions = {},
 ): UseAudioProcessorResult {
   const frequencyCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const waveformCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const circularOscillatorCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const graphRef = useRef<AudioGraphNodes | null>(null);
   const microphoneStreamRef = useRef<MediaStream | null>(null);
   const sourceNodeRef = useRef<AudioNode | null>(null);
@@ -232,24 +498,16 @@ export function useAudioProcessor(
   const lastStateUpdateRef = useRef(0);
   const startedAtRef = useRef(0);
   const playbackOffsetRef = useRef(0);
-  const modeRef = useRef<AudioInputMode>("microphone");
+  const initialStateRef = useRef<AudioProcessorState | null>(null);
+
+  if (!initialStateRef.current) {
+    initialStateRef.current = createInitialState();
+  }
+
+  const modeRef = useRef<AudioInputMode>(initialStateRef.current.inputMode);
   const isPlayingRef = useRef(false);
 
-  const [state, setState] = useState<AudioProcessorState>({
-    inputMode: "microphone",
-    isInitialized: false,
-    isPlaying: false,
-    isLoading: false,
-    levelDb: METER_FLOOR_DB,
-    peakDb: METER_FLOOR_DB,
-    gain: INITIAL_GAIN,
-    filterType: "lowpass",
-    filterFrequency: INITIAL_FILTER_FREQUENCY,
-    duration: 0,
-    currentTime: 0,
-    fileName: null,
-    error: null,
-  });
+  const [state, setState] = useState<AudioProcessorState>(() => initialStateRef.current!);
 
   const normalizedOptions = useMemo(
     () => ({
@@ -309,6 +567,7 @@ export function useAudioProcessor(
     const graph = graphRef.current;
     const frequencyCanvas = frequencyCanvasRef.current;
     const waveformCanvas = waveformCanvasRef.current;
+    const circularOscillatorCanvas = circularOscillatorCanvasRef.current;
     const loadedFile = loadedFileRef.current;
 
     if (!graph || !frequencyCanvas || !waveformCanvas) {
@@ -336,11 +595,21 @@ export function useAudioProcessor(
     drawFrequencyBars(frequencyCanvas, frequencyData);
     drawWaveform(waveformCanvas, waveformData);
 
+    if (circularOscillatorCanvas) {
+      drawCircularOscillator(circularOscillatorCanvas, waveformData);
+    }
+
     const now = performance.now();
 
     if (now - lastStateUpdateRef.current > 33) {
       lastStateUpdateRef.current = now;
       const levelDb = calculateRmsDb(waveformData);
+      const frequencyMetrics = calculateFrequencyMetrics(
+        frequencyData,
+        graph.context.sampleRate,
+      );
+      const zeroCrossingRate = calculateZeroCrossingRate(waveformData);
+      const crestDb = calculateCrestDb(waveformData);
 
       setState((previousState) => {
         const currentTime =
@@ -350,12 +619,45 @@ export function useAudioProcessor(
                 loadedFile?.buffer.duration ?? previousState.duration,
               )
             : playbackOffsetRef.current;
+        const shouldSampleRms = isPlayingRef.current;
+        const rmsSampleCount = shouldSampleRms
+          ? previousState.rmsSampleCount + 1
+          : previousState.rmsSampleCount;
+        const rmsMinDb =
+          !shouldSampleRms
+            ? previousState.rmsMinDb
+            : previousState.rmsSampleCount === 0
+            ? levelDb
+            : Math.min(previousState.rmsMinDb, levelDb);
+        const rmsMaxDb =
+          !shouldSampleRms
+            ? previousState.rmsMaxDb
+            : previousState.rmsSampleCount === 0
+            ? levelDb
+            : Math.max(previousState.rmsMaxDb, levelDb);
+        const rmsAverageDb =
+          !shouldSampleRms
+            ? previousState.rmsAverageDb
+            : previousState.rmsSampleCount === 0
+            ? levelDb
+            : (previousState.rmsAverageDb * previousState.rmsSampleCount + levelDb) /
+              rmsSampleCount;
 
         return {
           ...previousState,
           currentTime,
           levelDb,
           peakDb: Math.max(levelDb, previousState.peakDb - 0.18),
+          sampleRate: graph.context.sampleRate,
+          dominantFrequency: frequencyMetrics.dominantFrequency,
+          spectralCentroid: frequencyMetrics.spectralCentroid,
+          spectralRolloff: frequencyMetrics.spectralRolloff,
+          zeroCrossingRate,
+          crestDb,
+          rmsMinDb,
+          rmsAverageDb,
+          rmsMaxDb,
+          rmsSampleCount,
         };
       });
     }
@@ -478,12 +780,16 @@ export function useAudioProcessor(
       const microphoneSource = graph.context.createMediaStreamSource(stream);
 
       microphoneStreamRef.current = stream;
-      wireSource(microphoneSource, false);
+      wireSource(microphoneSource, true);
       updatePlayingState(true);
       setState((previousState) => ({
         ...previousState,
         inputMode: "microphone",
         currentTime: 0,
+        rmsMinDb: METER_FLOOR_DB,
+        rmsAverageDb: METER_FLOOR_DB,
+        rmsMaxDb: METER_FLOOR_DB,
+        rmsSampleCount: 0,
         error: null,
       }));
       startAnimation();
@@ -514,6 +820,7 @@ export function useAudioProcessor(
       try {
         disconnectSource();
         stopMicrophone();
+        loadedFileRef.current = null;
 
         const audioData = await file.arrayBuffer();
         const audioBuffer = await graph.context.decodeAudioData(audioData);
@@ -533,13 +840,28 @@ export function useAudioProcessor(
           duration: audioBuffer.duration,
           currentTime: 0,
           fileName: file.name,
+          hasLoadedFile: true,
+          fileSizeBytes: file.size,
+          fileType: file.type || "audio",
+          channelCount: audioBuffer.numberOfChannels,
+          sampleRate: audioBuffer.sampleRate,
           peakDb: METER_FLOOR_DB,
+          dominantFrequency: 0,
+          spectralCentroid: 0,
+          spectralRolloff: 0,
+          zeroCrossingRate: 0,
+          crestDb: 0,
+          rmsMinDb: METER_FLOOR_DB,
+          rmsAverageDb: METER_FLOOR_DB,
+          rmsMaxDb: METER_FLOOR_DB,
+          rmsSampleCount: 0,
           error: null,
         }));
       } catch {
         setState((previousState) => ({
           ...previousState,
           isLoading: false,
+          hasLoadedFile: false,
           error: "Die Audiodatei konnte nicht dekodiert werden.",
         }));
       }
@@ -616,6 +938,15 @@ export function useAudioProcessor(
       currentTime: 0,
       levelDb: METER_FLOOR_DB,
       peakDb: METER_FLOOR_DB,
+      dominantFrequency: 0,
+      spectralCentroid: 0,
+      spectralRolloff: 0,
+      zeroCrossingRate: 0,
+      crestDb: 0,
+      rmsMinDb: METER_FLOOR_DB,
+      rmsAverageDb: METER_FLOOR_DB,
+      rmsMaxDb: METER_FLOOR_DB,
+      rmsSampleCount: 0,
     }));
   }, [disconnectSource, stopMicrophone, updatePlayingState]);
 
@@ -687,6 +1018,18 @@ export function useAudioProcessor(
   }, []);
 
   useEffect(() => {
+    writeStoredAudioSettings(state);
+  }, [
+    state.fileName,
+    state.fileSizeBytes,
+    state.fileType,
+    state.filterFrequency,
+    state.filterType,
+    state.gain,
+    state.inputMode,
+  ]);
+
+  useEffect(() => {
     return () => {
       stopAnimation();
       disconnectSource();
@@ -702,6 +1045,7 @@ export function useAudioProcessor(
     () => ({
       frequencyCanvasRef,
       waveformCanvasRef,
+      circularOscillatorCanvasRef,
     }),
     [],
   );

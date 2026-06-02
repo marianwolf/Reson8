@@ -1,4 +1,5 @@
-import type { ChangeEvent } from "react";
+import { useState } from "react";
+import type { ChangeEvent, DragEvent } from "react";
 import {
   type AudioInputMode,
   type FilterMode,
@@ -37,11 +38,47 @@ function formatTime(seconds: number) {
 }
 
 function formatFrequency(frequency: number) {
+  if (!Number.isFinite(frequency) || frequency <= 0) {
+    return "0 Hz";
+  }
+
   if (frequency >= 1_000) {
     return `${(frequency / 1_000).toFixed(frequency >= 10_000 ? 1 : 2)} kHz`;
   }
 
   return `${Math.round(frequency)} Hz`;
+}
+
+function formatFileSize(fileSizeBytes: number | null) {
+  if (!fileSizeBytes) {
+    return "Keine Datei";
+  }
+
+  if (fileSizeBytes >= 1_000_000) {
+    return `${(fileSizeBytes / 1_000_000).toFixed(1)} MB`;
+  }
+
+  if (fileSizeBytes >= 1_000) {
+    return `${Math.round(fileSizeBytes / 1_000)} KB`;
+  }
+
+  return `${fileSizeBytes} B`;
+}
+
+function formatPercentage(value: number) {
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function formatSampleRate(sampleRate: number | null) {
+  if (!sampleRate) {
+    return "n/a";
+  }
+
+  return `${(sampleRate / 1_000).toFixed(1)} kHz`;
+}
+
+function formatDb(value: number) {
+  return `${value.toFixed(1)} dB`;
 }
 
 function modeLabel(mode: AudioInputMode) {
@@ -53,6 +90,7 @@ function filterLabel(filterType: FilterMode) {
 }
 
 export default function AudioVisualizerDashboard() {
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
   const { state, refs, controls } = useAudioProcessor({
     fftSize: 2048,
     smoothingTimeConstant: 0.82,
@@ -68,12 +106,31 @@ export default function AudioVisualizerDashboard() {
     controls.setInputMode(mode);
   };
 
-  const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-
+  const loadDroppedOrSelectedFile = async (file: File | undefined) => {
     if (file) {
       await controls.loadAudioFile(file);
     }
+  };
+
+  const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    await loadDroppedOrSelectedFile(event.target.files?.[0]);
+    event.target.value = "";
+  };
+
+  const handleFileDragOver = (event: DragEvent<HTMLLabelElement>) => {
+    event.preventDefault();
+    setIsDraggingFile(true);
+  };
+
+  const handleFileDragLeave = (event: DragEvent<HTMLLabelElement>) => {
+    event.preventDefault();
+    setIsDraggingFile(false);
+  };
+
+  const handleFileDrop = async (event: DragEvent<HTMLLabelElement>) => {
+    event.preventDefault();
+    setIsDraggingFile(false);
+    await loadDroppedOrSelectedFile(event.dataTransfer.files[0]);
   };
 
   const handleFilterSliderChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -96,8 +153,9 @@ export default function AudioVisualizerDashboard() {
               Web Audio Analyzer
             </h1>
             <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300 sm:text-base">
-              Echtzeit-Frequenzanalyse, Oszilloskop, dB-Meter und Filtersteuerung
-              für Mikrofon-Input oder lokale MP3-Wiedergabe.
+              Professionelle Echtzeit-Frequenzanalyse, Oszilloskop, dB-Meter,
+              Signalmetriken und Filtersteuerung für Mikrofon-Input oder lokale
+              Audiodateien.
             </p>
           </div>
 
@@ -162,6 +220,26 @@ export default function AudioVisualizerDashboard() {
                 className="h-56 w-full rounded-3xl border border-white/5 bg-slate-900/80"
               />
             </article>
+
+            <article className="rounded-[2rem] border border-white/10 bg-slate-950/70 p-4 shadow-2xl shadow-black/30 backdrop-blur-xl sm:p-5">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-bold text-white">Round Oscillator</h2>
+                  <p className="text-xs uppercase tracking-[0.22em] text-slate-500">
+                    Circular Time Domain
+                  </p>
+                </div>
+                <span className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1 text-xs font-bold text-cyan-100">
+                  RMS {formatDb(state.levelDb)}
+                </span>
+              </div>
+              <div className="flex justify-center">
+                <canvas
+                  ref={refs.circularOscillatorCanvasRef}
+                  className="aspect-square h-80 max-h-[22rem] w-full max-w-[22rem] rounded-full border border-white/5 bg-slate-900/80"
+                />
+              </div>
+            </article>
           </section>
 
           <aside className="grid gap-6">
@@ -190,15 +268,28 @@ export default function AudioVisualizerDashboard() {
                   onClick={controls.startMicrophone}
                   className="mt-4 w-full rounded-2xl border border-cyan-300/20 bg-cyan-300/10 px-4 py-3 text-sm font-bold text-cyan-100 transition hover:bg-cyan-300/20"
                 >
-                  Mikrofon aktivieren
+                  Mikrofon aktivieren & abhören
                 </button>
               ) : (
-                <label className="mt-4 flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-slate-500/60 bg-slate-950/60 px-4 py-6 text-center transition hover:border-cyan-300/60 hover:bg-cyan-300/5">
+                <label
+                  onDragOver={handleFileDragOver}
+                  onDragLeave={handleFileDragLeave}
+                  onDrop={handleFileDrop}
+                  className={`mt-4 flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed px-4 py-6 text-center transition ${
+                    isDraggingFile
+                      ? "border-cyan-300/80 bg-cyan-300/10"
+                      : "border-slate-500/60 bg-slate-950/60 hover:border-cyan-300/60 hover:bg-cyan-300/5"
+                  }`}
+                >
                   <span className="text-sm font-bold text-white">
-                    MP3 oder Audiodatei hochladen
+                    Audiodatei ablegen oder hochladen
                   </span>
                   <span className="mt-1 text-xs text-slate-400">
-                    {state.fileName ?? "Lokale Datei auswählen"}
+                    {state.hasLoadedFile
+                      ? state.fileName
+                      : state.fileName
+                        ? `Zuletzt: ${state.fileName}`
+                        : "MP3, WAV, FLAC oder andere lokale Audiodatei"}
                   </span>
                   <input
                     type="file"
@@ -211,6 +302,20 @@ export default function AudioVisualizerDashboard() {
 
               {state.inputMode === "file" && (
                 <div className="mt-4">
+                  <div className="mb-4 grid grid-cols-2 gap-2 text-xs">
+                    <div className="rounded-2xl bg-slate-950/70 px-3 py-2">
+                      <p className="uppercase tracking-[0.18em] text-slate-500">Größe</p>
+                      <p className="mt-1 font-mono font-bold text-slate-200">
+                        {formatFileSize(state.fileSizeBytes)}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl bg-slate-950/70 px-3 py-2">
+                      <p className="uppercase tracking-[0.18em] text-slate-500">Format</p>
+                      <p className="mt-1 truncate font-mono font-bold text-slate-200">
+                        {state.fileType ?? "n/a"}
+                      </p>
+                    </div>
+                  </div>
                   <div className="mb-2 flex justify-between text-xs text-slate-400">
                     <span>{formatTime(state.currentTime)}</span>
                     <span>{formatTime(state.duration)}</span>
@@ -224,7 +329,7 @@ export default function AudioVisualizerDashboard() {
                   <button
                     type="button"
                     onClick={state.isPlaying ? controls.pauseFile : controls.playFile}
-                    disabled={!state.fileName || state.isLoading}
+                    disabled={!state.hasLoadedFile || state.isLoading}
                     className="mt-4 w-full rounded-2xl bg-violet-400 px-4 py-3 text-sm font-bold text-slate-950 transition hover:bg-violet-300 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {state.isLoading
@@ -241,7 +346,7 @@ export default function AudioVisualizerDashboard() {
               <div className="flex items-center justify-between">
                 <h2 className="text-lg font-bold text-white">Volume Meter</h2>
                 <span className="font-mono text-sm font-bold text-cyan-200">
-                  {state.levelDb.toFixed(1)} dB
+                  {formatDb(state.levelDb)}
                 </span>
               </div>
               <div className="mt-4 h-5 overflow-hidden rounded-full bg-slate-950 ring-1 ring-white/10">
@@ -261,6 +366,102 @@ export default function AudioVisualizerDashboard() {
                 <span>-48</span>
                 <span>-12 dB</span>
               </div>
+            </section>
+
+            <section className="rounded-[2rem] border border-white/10 bg-white/[0.04] p-5 backdrop-blur-xl">
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-bold text-white">Static RMS</h2>
+                <span className="rounded-full bg-white/10 px-3 py-1 text-xs font-bold text-slate-200">
+                  {state.rmsSampleCount} Samples
+                </span>
+              </div>
+
+              <dl className="mt-4 grid grid-cols-2 gap-2 text-xs">
+                <div className="rounded-2xl bg-slate-950/70 px-3 py-2">
+                  <dt className="uppercase tracking-[0.18em] text-slate-500">Current</dt>
+                  <dd className="mt-1 font-mono font-bold text-cyan-100">
+                    {formatDb(state.levelDb)}
+                  </dd>
+                </div>
+                <div className="rounded-2xl bg-slate-950/70 px-3 py-2">
+                  <dt className="uppercase tracking-[0.18em] text-slate-500">Average</dt>
+                  <dd className="mt-1 font-mono font-bold text-cyan-100">
+                    {formatDb(state.rmsAverageDb)}
+                  </dd>
+                </div>
+                <div className="rounded-2xl bg-slate-950/70 px-3 py-2">
+                  <dt className="uppercase tracking-[0.18em] text-slate-500">Min</dt>
+                  <dd className="mt-1 font-mono font-bold text-cyan-100">
+                    {formatDb(state.rmsMinDb)}
+                  </dd>
+                </div>
+                <div className="rounded-2xl bg-slate-950/70 px-3 py-2">
+                  <dt className="uppercase tracking-[0.18em] text-slate-500">Max</dt>
+                  <dd className="mt-1 font-mono font-bold text-cyan-100">
+                    {formatDb(state.rmsMaxDb)}
+                  </dd>
+                </div>
+              </dl>
+            </section>
+
+            <section className="rounded-[2rem] border border-white/10 bg-white/[0.04] p-5 backdrop-blur-xl">
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-bold text-white">Analysis Snapshot</h2>
+                <span className="rounded-full bg-white/10 px-3 py-1 text-xs font-bold text-slate-200">
+                  {state.isPlaying ? "Live" : "Ready"}
+                </span>
+              </div>
+
+              <dl className="mt-4 grid grid-cols-2 gap-2 text-xs">
+                <div className="rounded-2xl bg-slate-950/70 px-3 py-2">
+                  <dt className="uppercase tracking-[0.18em] text-slate-500">Peak</dt>
+                  <dd className="mt-1 font-mono font-bold text-cyan-100">
+                    {formatDb(state.peakDb)}
+                  </dd>
+                </div>
+                <div className="rounded-2xl bg-slate-950/70 px-3 py-2">
+                  <dt className="uppercase tracking-[0.18em] text-slate-500">Crest</dt>
+                  <dd className="mt-1 font-mono font-bold text-cyan-100">
+                    {formatDb(state.crestDb)}
+                  </dd>
+                </div>
+                <div className="rounded-2xl bg-slate-950/70 px-3 py-2">
+                  <dt className="uppercase tracking-[0.18em] text-slate-500">Dominant</dt>
+                  <dd className="mt-1 font-mono font-bold text-cyan-100">
+                    {formatFrequency(state.dominantFrequency)}
+                  </dd>
+                </div>
+                <div className="rounded-2xl bg-slate-950/70 px-3 py-2">
+                  <dt className="uppercase tracking-[0.18em] text-slate-500">Centroid</dt>
+                  <dd className="mt-1 font-mono font-bold text-cyan-100">
+                    {formatFrequency(state.spectralCentroid)}
+                  </dd>
+                </div>
+                <div className="rounded-2xl bg-slate-950/70 px-3 py-2">
+                  <dt className="uppercase tracking-[0.18em] text-slate-500">Rolloff</dt>
+                  <dd className="mt-1 font-mono font-bold text-cyan-100">
+                    {formatFrequency(state.spectralRolloff)}
+                  </dd>
+                </div>
+                <div className="rounded-2xl bg-slate-950/70 px-3 py-2">
+                  <dt className="uppercase tracking-[0.18em] text-slate-500">ZCR</dt>
+                  <dd className="mt-1 font-mono font-bold text-cyan-100">
+                    {formatPercentage(state.zeroCrossingRate)}
+                  </dd>
+                </div>
+                <div className="rounded-2xl bg-slate-950/70 px-3 py-2">
+                  <dt className="uppercase tracking-[0.18em] text-slate-500">Sample</dt>
+                  <dd className="mt-1 font-mono font-bold text-cyan-100">
+                    {formatSampleRate(state.sampleRate)}
+                  </dd>
+                </div>
+                <div className="rounded-2xl bg-slate-950/70 px-3 py-2">
+                  <dt className="uppercase tracking-[0.18em] text-slate-500">Kanäle</dt>
+                  <dd className="mt-1 font-mono font-bold text-cyan-100">
+                    {state.channelCount ?? "n/a"}
+                  </dd>
+                </div>
+              </dl>
             </section>
 
             <section className="rounded-[2rem] border border-white/10 bg-white/[0.04] p-5 backdrop-blur-xl">
