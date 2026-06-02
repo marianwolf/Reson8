@@ -141,6 +141,10 @@ export default function AudioVisualizerDashboard() {
     controls.setGain(Number(event.target.value));
   };
 
+  const handleDownloadFilteredFile = async () => {
+    await controls.downloadFilteredFile();
+  };
+
   return (
     <main className="min-h-screen overflow-hidden px-4 py-6 text-slate-100 sm:px-6 lg:px-8">
       <section className="mx-auto flex max-w-7xl flex-col gap-6">
@@ -528,6 +532,16 @@ export default function AudioVisualizerDashboard() {
                     className="h-2 w-full cursor-pointer accent-violet-300"
                   />
                 </label>
+                <button
+                    type="button"
+                    onClick={handleDownloadFilteredFile}
+                    disabled={!state.hasLoadedFile || state.isExporting}
+                    className="mt-3 w-full rounded-2xl border border-cyan-300/20 bg-cyan-300/10 px-4 py-3 text-sm font-bold text-cyan-100 transition hover:bg-cyan-300/20 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {state.isExporting
+                      ? "Exportiere Cutoff..."
+                      : "Cutoff Output herunterladen"}
+                  </button>
               </div>
             </section>
           </aside>

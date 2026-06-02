@@ -7,6 +7,7 @@ Reson8 ist ein professionelles Audio-Analyse-Tool fuer schnelle Signalpruefung i
 ## Interaktionsprinzipien
 
 - Der erste Bildschirm bleibt das Analyse-Dashboard, keine Marketing- oder Landing-Page.
+- Die Analyse ist sowohl im Studio als auch direkt ueber die Subpage `/analysis` erreichbar.
 - Drag-and-Drop und klassischer Datei-Upload fuehren zur gleichen Analyse-Pipeline.
 - Lokale Einstellungen werden im Browser gespeichert, damit Filtertyp, Cutoff, Gain, Modus und letzte Datei-Metadaten nach einem Reload erhalten bleiben.
 - Audiodateien selbst werden nicht persistiert, weil Browser sie aus Sicherheitsgruenden nicht ohne erneute Nutzerauswahl wiederherstellen duerfen.
@@ -20,6 +21,10 @@ Reson8 ist ein professionelles Audio-Analyse-Tool fuer schnelle Signalpruefung i
 - Static RMS mit Current, Average, Min, Max und Sample-Anzahl.
 - Analysis Snapshot mit Dominant Frequency, Spectral Centroid, Spectral Rolloff, Zero Crossing Rate, Crest-Faktor, Sample Rate und Kanalanzahl.
 - Audio Tools fuer Gain, Lowpass/Highpass und Cutoff Frequency.
+
+## Datei-Export
+
+Geladene Audiodateien koennen als neuer WAV-Output heruntergeladen werden. Der Export wird offline gerendert und nutzt die aktuell eingestellten Werte fuer Gain, Filtertyp und Cutoff Frequency.
 
 ## Monitoring
 

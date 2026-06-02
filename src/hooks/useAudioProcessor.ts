@@ -17,6 +17,7 @@ export interface AudioProcessorState {
   isInitialized: boolean;
   isPlaying: boolean;
   isLoading: boolean;
+  isExporting: boolean;
   levelDb: number;
   peakDb: number;
   gain: number;
@@ -52,6 +53,7 @@ export interface AudioProcessorControls {
   initialize: () => Promise<void>;
   startMicrophone: () => Promise<void>;
   loadAudioFile: (file: File) => Promise<void>;
+  downloadFilteredFile: () => Promise<void>;
   playFile: () => Promise<void>;
   pauseFile: () => void;
   stop: () => void;
@@ -432,6 +434,7 @@ function createInitialState(): AudioProcessorState {
     isInitialized: false,
     isPlaying: false,
     isLoading: false,
+    isExporting: false,
     levelDb: METER_FLOOR_DB,
     peakDb: METER_FLOOR_DB,
     gain: storedSettings.gain ?? INITIAL_GAIN,
@@ -479,6 +482,59 @@ function writeStoredAudioSettings(state: AudioProcessorState) {
   } catch {
     undefined;
   }
+}
+
+function writeString(view: DataView, offset: number, value: string) {
+  for (let index = 0; index < value.length; index += 1) {
+    view.setUint8(offset + index, value.charCodeAt(index));
+  }
+}
+
+function encodeAudioBufferToWav(audioBuffer: AudioBuffer) {
+  const bytesPerSample = 2;
+  const channelCount = audioBuffer.numberOfChannels;
+  const sampleCount = audioBuffer.length;
+  const dataSize = sampleCount * channelCount * bytesPerSample;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  writeString(view, 0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(view, 8, "WAVE");
+  writeString(view, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, channelCount, true);
+  view.setUint32(24, audioBuffer.sampleRate, true);
+  view.setUint32(28, audioBuffer.sampleRate * channelCount * bytesPerSample, true);
+  view.setUint16(32, channelCount * bytesPerSample, true);
+  view.setUint16(34, 16, true);
+  writeString(view, 36, "data");
+  view.setUint32(40, dataSize, true);
+
+  let offset = 44;
+  const channelData = Array.from(
+    { length: channelCount },
+    (_, channelIndex) => audioBuffer.getChannelData(channelIndex),
+  );
+
+  for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
+    for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
+      const sample = clamp(channelData[channelIndex][sampleIndex], -1, 1);
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+      offset += bytesPerSample;
+    }
+  }
+
+  return buffer;
+}
+
+function createDownloadFileName(fileName: string, filterFrequency: number) {
+  const extensionIndex = fileName.lastIndexOf(".");
+  const baseName = extensionIndex > 0 ? fileName.slice(0, extensionIndex) : fileName;
+  const safeBaseName = baseName.replace(/[^a-z0-9-_]+/gi, "-").replace(/^-+|-+$/g, "");
+
+  return `${safeBaseName || "reson8"}-cutoff-${Math.round(filterFrequency)}hz.wav`;
 }
 
 export function useAudioProcessor(
@@ -837,6 +893,7 @@ export function useAudioProcessor(
           ...previousState,
           inputMode: "file",
           isLoading: false,
+          isExporting: false,
           duration: audioBuffer.duration,
           currentTime: 0,
           fileName: file.name,
@@ -868,6 +925,74 @@ export function useAudioProcessor(
     },
     [disconnectSource, initialize, stopMicrophone, updatePlayingState],
   );
+
+  const downloadFilteredFile = useCallback(async () => {
+    const loadedFile = loadedFileRef.current;
+
+    if (!loadedFile) {
+      setState((previousState) => ({
+        ...previousState,
+        error: "Bitte lade zuerst eine Audiodatei.",
+      }));
+      return;
+    }
+
+    setState((previousState) => ({
+      ...previousState,
+      isExporting: true,
+      error: null,
+    }));
+
+    try {
+      const offlineContext = new OfflineAudioContext(
+        loadedFile.buffer.numberOfChannels,
+        loadedFile.buffer.length,
+        loadedFile.buffer.sampleRate,
+      );
+      const sourceNode = offlineContext.createBufferSource();
+      const gainNode = offlineContext.createGain();
+      const filterNode = offlineContext.createBiquadFilter();
+
+      sourceNode.buffer = loadedFile.buffer;
+      gainNode.gain.value = state.gain;
+      filterNode.type = state.filterType;
+      filterNode.frequency.value = state.filterFrequency;
+      filterNode.Q.value = 0.72;
+
+      sourceNode.connect(gainNode);
+      gainNode.connect(filterNode);
+      filterNode.connect(offlineContext.destination);
+      sourceNode.start(0);
+
+      const renderedBuffer = await offlineContext.startRendering();
+      const wavBuffer = encodeAudioBufferToWav(renderedBuffer);
+      const wavBlob = new Blob([wavBuffer], { type: "audio/wav" });
+      const downloadUrl = URL.createObjectURL(wavBlob);
+      const downloadLink = document.createElement("a");
+
+      downloadLink.href = downloadUrl;
+      downloadLink.download = createDownloadFileName(
+        loadedFile.name,
+        state.filterFrequency,
+      );
+      document.body.append(downloadLink);
+      downloadLink.click();
+      downloadLink.remove();
+      URL.revokeObjectURL(downloadUrl);
+
+      setState((previousState) => ({
+        ...previousState,
+        isExporting: false,
+        error: null,
+      }));
+    } catch {
+      setState((previousState) => ({
+        ...previousState,
+        isExporting: false,
+        error: "Der gefilterte Datei-Export konnte nicht erstellt werden.",
+      }));
+    }
+  }, [state.filterFrequency, state.filterType, state.gain]);
 
   const playFile = useCallback(async () => {
     await initialize();
@@ -1055,6 +1180,7 @@ export function useAudioProcessor(
       initialize,
       startMicrophone,
       loadAudioFile,
+      downloadFilteredFile,
       playFile,
       pauseFile,
       stop,
@@ -1064,6 +1190,7 @@ export function useAudioProcessor(
       setFilterFrequency,
     }),
     [
+      downloadFilteredFile,
       initialize,
       loadAudioFile,
       pauseFile,
