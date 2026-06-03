@@ -1,9 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
 
-export type AudioInputMode = "microphone" | "file";
+export type AudioInputMode = "microphone" | "file" | "generator";
 
-export type FilterMode = "lowpass" | "highpass";
+export type FilterMode =
+  | "lowpass"
+  | "highpass"
+  | "bandpass"
+  | "notch"
+  | "peaking"
+  | "lowshelf"
+  | "highshelf";
+
+export type GeneratorType = "sine" | "square" | "sawtooth" | "triangle" | "white_noise";
 
 export interface AudioProcessorOptions {
   fftSize?: number;
@@ -23,6 +32,7 @@ export interface AudioProcessorState {
   gain: number;
   filterType: FilterMode;
   filterFrequency: number;
+  filterQ: number;
   duration: number;
   currentTime: number;
   fileName: string | null;
@@ -41,6 +51,35 @@ export interface AudioProcessorState {
   rmsMaxDb: number;
   rmsSampleCount: number;
   error: string | null;
+
+  // Equalizer (3-Band)
+  eqLow: number;  // gain in dB, -12 to +12
+  eqMid: number;  // gain in dB, -12 to +12
+  eqHigh: number; // gain in dB, -12 to +12
+
+  // Compressor
+  compressorEnabled: boolean;
+  compressorThreshold: number; // dB, -60 to 0
+  compressorKnee: number;      // dB, 0 to 40
+  compressorRatio: number;     // 1 to 20
+  compressorAttack: number;    // seconds, 0.001 to 1.0
+  compressorRelease: number;   // seconds, 0.01 to 3.0
+
+  // Delay / Echo
+  delayEnabled: boolean;
+  delayTime: number;      // seconds, 0.0 to 2.0
+  delayFeedback: number;  // 0.0 to 0.95
+  delayMix: number;       // 0.0 to 1.0 (dry/wet)
+
+  // Signal Generator
+  generatorEnabled: boolean;
+  generatorType: GeneratorType;
+  generatorFrequency: number;   // Hz, 40 to 20,000
+  generatorVolume: number;      // 0.0 to 1.0
+
+  // Analyzer Configuration
+  fftSize: number;
+  smoothing: number;
 }
 
 export interface AudioProcessorRefs {
@@ -61,6 +100,26 @@ export interface AudioProcessorControls {
   setGain: (gain: number) => void;
   setFilterType: (filterType: FilterMode) => void;
   setFilterFrequency: (frequency: number) => void;
+  setFilterQ: (q: number) => void;
+  setEqLow: (gain: number) => void;
+  setEqMid: (gain: number) => void;
+  setEqHigh: (gain: number) => void;
+  setCompressorEnabled: (enabled: boolean) => void;
+  setCompressorThreshold: (threshold: number) => void;
+  setCompressorKnee: (knee: number) => void;
+  setCompressorRatio: (ratio: number) => void;
+  setCompressorAttack: (attack: number) => void;
+  setCompressorRelease: (release: number) => void;
+  setDelayEnabled: (enabled: boolean) => void;
+  setDelayTime: (time: number) => void;
+  setDelayFeedback: (feedback: number) => void;
+  setDelayMix: (mix: number) => void;
+  setGeneratorEnabled: (enabled: boolean) => void;
+  setGeneratorType: (type: GeneratorType) => void;
+  setGeneratorFrequency: (frequency: number) => void;
+  setGeneratorVolume: (volume: number) => void;
+  setFftSize: (size: number) => void;
+  setSmoothing: (smoothing: number) => void;
 }
 
 export interface UseAudioProcessorResult {
@@ -74,6 +133,14 @@ interface AudioGraphNodes {
   analyser: AnalyserNode;
   gainNode: GainNode;
   filterNode: BiquadFilterNode;
+  lowEQ: BiquadFilterNode;
+  midEQ: BiquadFilterNode;
+  highEQ: BiquadFilterNode;
+  compressorNode: DynamicsCompressorNode;
+  delayNode: DelayNode;
+  feedbackGainNode: GainNode;
+  wetGainNode: GainNode;
+  dryGainNode: GainNode;
 }
 
 interface LoadedAudioFile {
@@ -100,6 +167,25 @@ interface StoredAudioSettings {
   fileName?: string | null;
   fileSizeBytes?: number | null;
   fileType?: string | null;
+  filterQ?: number;
+  eqLow?: number;
+  eqMid?: number;
+  eqHigh?: number;
+  compressorEnabled?: boolean;
+  compressorThreshold?: number;
+  compressorKnee?: number;
+  compressorRatio?: number;
+  compressorAttack?: number;
+  compressorRelease?: number;
+  delayEnabled?: boolean;
+  delayTime?: number;
+  delayFeedback?: number;
+  delayMix?: number;
+  generatorType?: GeneratorType;
+  generatorFrequency?: number;
+  generatorVolume?: number;
+  fftSize?: number;
+  smoothing?: number;
 }
 
 function clamp(value: number, minimum: number, maximum: number) {
@@ -136,12 +222,13 @@ function drawFrequencyBars(canvas: HTMLCanvasElement, frequencyData: AudioByteDa
   canvasContext.fillRect(0, 0, width, height);
 
   const barCount = Math.min(160, frequencyData.length);
-  const step = Math.floor(frequencyData.length / barCount);
+  const step = Math.floor(frequencyData.length / barCount) || 1;
   const gap = Math.max(2, width * 0.004);
   const barWidth = width / barCount - gap;
 
   for (let index = 0; index < barCount; index += 1) {
-    const value = frequencyData[index * step] / 255;
+    const dataIndex = Math.min(index * step, frequencyData.length - 1);
+    const value = frequencyData[dataIndex] / 255;
     const easedValue = Math.pow(value, 1.45);
     const barHeight = Math.max(3, easedValue * height * 0.92);
     const xPosition = index * (barWidth + gap);
@@ -364,6 +451,16 @@ function calculateFrequencyMetrics(frequencyData: AudioByteData, sampleRate: num
   };
 }
 
+function createWhiteNoiseBuffer(context: AudioContext) {
+  const bufferSize = context.sampleRate * 2; // 2 seconds of noise
+  const noiseBuffer = context.createBuffer(1, bufferSize, context.sampleRate);
+  const output = noiseBuffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) {
+    output[i] = Math.random() * 2 - 1;
+  }
+  return noiseBuffer;
+}
+
 function readStoredAudioSettings(): StoredAudioSettings {
   if (typeof window === "undefined") {
     return {};
@@ -380,20 +477,23 @@ function readStoredAudioSettings(): StoredAudioSettings {
 
     return {
       inputMode:
-        parsedSettings.inputMode === "file" || parsedSettings.inputMode === "microphone"
+        parsedSettings.inputMode === "file" ||
+        parsedSettings.inputMode === "microphone" ||
+        parsedSettings.inputMode === "generator"
           ? parsedSettings.inputMode
           : undefined,
       gain:
         typeof parsedSettings.gain === "number"
           ? clamp(parsedSettings.gain, 0, 2)
           : undefined,
-      filterType:
-        parsedSettings.filterType === "lowpass" || parsedSettings.filterType === "highpass"
-          ? parsedSettings.filterType
-          : undefined,
+      filterType: parsedSettings.filterType,
       filterFrequency:
         typeof parsedSettings.filterFrequency === "number"
           ? clamp(parsedSettings.filterFrequency, 40, 18_000)
+          : undefined,
+      filterQ:
+        typeof parsedSettings.filterQ === "number"
+          ? clamp(parsedSettings.filterQ, 0.1, 18)
           : undefined,
       fileName:
         typeof parsedSettings.fileName === "string" ? parsedSettings.fileName : null,
@@ -401,6 +501,24 @@ function readStoredAudioSettings(): StoredAudioSettings {
         typeof parsedSettings.fileSizeBytes === "number" ? parsedSettings.fileSizeBytes : null,
       fileType:
         typeof parsedSettings.fileType === "string" ? parsedSettings.fileType : null,
+      eqLow: typeof parsedSettings.eqLow === "number" ? clamp(parsedSettings.eqLow, -12, 12) : undefined,
+      eqMid: typeof parsedSettings.eqMid === "number" ? clamp(parsedSettings.eqMid, -12, 12) : undefined,
+      eqHigh: typeof parsedSettings.eqHigh === "number" ? clamp(parsedSettings.eqHigh, -12, 12) : undefined,
+      compressorEnabled: parsedSettings.compressorEnabled,
+      compressorThreshold: parsedSettings.compressorThreshold,
+      compressorKnee: parsedSettings.compressorKnee,
+      compressorRatio: parsedSettings.compressorRatio,
+      compressorAttack: parsedSettings.compressorAttack,
+      compressorRelease: parsedSettings.compressorRelease,
+      delayEnabled: parsedSettings.delayEnabled,
+      delayTime: parsedSettings.delayTime,
+      delayFeedback: parsedSettings.delayFeedback,
+      delayMix: parsedSettings.delayMix,
+      generatorType: parsedSettings.generatorType,
+      generatorFrequency: parsedSettings.generatorFrequency,
+      generatorVolume: parsedSettings.generatorVolume,
+      fftSize: parsedSettings.fftSize,
+      smoothing: parsedSettings.smoothing,
     };
   } catch {
     return {};
@@ -421,6 +539,7 @@ function createInitialState(): AudioProcessorState {
     gain: storedSettings.gain ?? INITIAL_GAIN,
     filterType: storedSettings.filterType ?? "lowpass",
     filterFrequency: storedSettings.filterFrequency ?? INITIAL_FILTER_FREQUENCY,
+    filterQ: storedSettings.filterQ ?? 0.72,
     duration: 0,
     currentTime: 0,
     fileName: storedSettings.fileName ?? null,
@@ -439,6 +558,27 @@ function createInitialState(): AudioProcessorState {
     rmsMaxDb: METER_FLOOR_DB,
     rmsSampleCount: 0,
     error: null,
+
+    // New FX states
+    eqLow: storedSettings.eqLow ?? 0,
+    eqMid: storedSettings.eqMid ?? 0,
+    eqHigh: storedSettings.eqHigh ?? 0,
+    compressorEnabled: storedSettings.compressorEnabled ?? false,
+    compressorThreshold: storedSettings.compressorThreshold ?? -24,
+    compressorKnee: storedSettings.compressorKnee ?? 30,
+    compressorRatio: storedSettings.compressorRatio ?? 12,
+    compressorAttack: storedSettings.compressorAttack ?? 0.003,
+    compressorRelease: storedSettings.compressorRelease ?? 0.25,
+    delayEnabled: storedSettings.delayEnabled ?? false,
+    delayTime: storedSettings.delayTime ?? 0.3,
+    delayFeedback: storedSettings.delayFeedback ?? 0.5,
+    delayMix: storedSettings.delayMix ?? 0.3,
+    generatorEnabled: false,
+    generatorType: storedSettings.generatorType ?? "sine",
+    generatorFrequency: storedSettings.generatorFrequency ?? 440,
+    generatorVolume: storedSettings.generatorVolume ?? 0.2,
+    fftSize: storedSettings.fftSize ?? 2048,
+    smoothing: storedSettings.smoothing ?? 0.82,
   };
 }
 
@@ -455,9 +595,28 @@ function writeStoredAudioSettings(state: AudioProcessorState) {
         gain: state.gain,
         filterType: state.filterType,
         filterFrequency: state.filterFrequency,
+        filterQ: state.filterQ,
         fileName: state.fileName,
         fileSizeBytes: state.fileSizeBytes,
         fileType: state.fileType,
+        eqLow: state.eqLow,
+        eqMid: state.eqMid,
+        eqHigh: state.eqHigh,
+        compressorEnabled: state.compressorEnabled,
+        compressorThreshold: state.compressorThreshold,
+        compressorKnee: state.compressorKnee,
+        compressorRatio: state.compressorRatio,
+        compressorAttack: state.compressorAttack,
+        compressorRelease: state.compressorRelease,
+        delayEnabled: state.delayEnabled,
+        delayTime: state.delayTime,
+        delayFeedback: state.delayFeedback,
+        delayMix: state.delayMix,
+        generatorType: state.generatorType,
+        generatorFrequency: state.generatorFrequency,
+        generatorVolume: state.generatorVolume,
+        fftSize: state.fftSize,
+        smoothing: state.smoothing,
       } satisfies StoredAudioSettings),
     );
   } catch {
@@ -528,6 +687,8 @@ export function useAudioProcessor(
   const microphoneStreamRef = useRef<MediaStream | null>(null);
   const sourceNodeRef = useRef<AudioNode | null>(null);
   const fileSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const generatorSourceRef = useRef<AudioNode | null>(null);
+  const generatorGainNodeRef = useRef<GainNode | null>(null);
   const loadedFileRef = useRef<LoadedAudioFile | null>(null);
   const frequencyDataRef = useRef<AudioByteData | null>(null);
   const waveformDataRef = useRef<AudioByteData | null>(null);
@@ -548,8 +709,8 @@ export function useAudioProcessor(
 
   const normalizedOptions = useMemo(
     () => ({
-      fftSize: options.fftSize ?? DEFAULT_FFT_SIZE,
-      smoothingTimeConstant: options.smoothingTimeConstant ?? DEFAULT_SMOOTHING,
+      fftSize: options.fftSize ?? state.fftSize,
+      smoothingTimeConstant: options.smoothingTimeConstant ?? state.smoothing,
       minDecibels: options.minDecibels ?? MIN_DECIBELS,
       maxDecibels: options.maxDecibels ?? MAX_DECIBELS,
     }),
@@ -558,6 +719,8 @@ export function useAudioProcessor(
       options.maxDecibels,
       options.minDecibels,
       options.smoothingTimeConstant,
+      state.fftSize,
+      state.smoothing,
     ],
   );
 
@@ -573,7 +736,7 @@ export function useAudioProcessor(
       try {
         fileSourceRef.current.stop();
       } catch {
-        undefined;
+        // ignore
       }
       fileSourceRef.current.disconnect();
       fileSourceRef.current = null;
@@ -589,6 +752,30 @@ export function useAudioProcessor(
     if (microphoneStreamRef.current) {
       microphoneStreamRef.current.getTracks().forEach((track) => track.stop());
       microphoneStreamRef.current = null;
+    }
+  }, []);
+
+  const stopGenerator = useCallback(() => {
+    if (generatorSourceRef.current) {
+      try {
+        (generatorSourceRef.current as any).stop();
+      } catch {
+        // ignore
+      }
+      try {
+        generatorSourceRef.current.disconnect();
+      } catch {
+        // ignore
+      }
+      generatorSourceRef.current = null;
+    }
+    if (generatorGainNodeRef.current) {
+      try {
+        generatorGainNodeRef.current.disconnect();
+      } catch {
+        // ignore
+      }
+      generatorGainNodeRef.current = null;
     }
   }, []);
 
@@ -738,6 +925,49 @@ export function useAudioProcessor(
     const gainNode = context.createGain();
     const filterNode = context.createBiquadFilter();
 
+    // 3-Band EQ Biquad Filter Nodes
+    const lowEQ = context.createBiquadFilter();
+    lowEQ.type = "lowshelf";
+    lowEQ.frequency.value = 200;
+    lowEQ.gain.value = state.eqLow;
+
+    const midEQ = context.createBiquadFilter();
+    midEQ.type = "peaking";
+    midEQ.frequency.value = 1000;
+    midEQ.Q.value = 1.0;
+    midEQ.gain.value = state.eqMid;
+
+    const highEQ = context.createBiquadFilter();
+    highEQ.type = "highshelf";
+    highEQ.frequency.value = 5000;
+    highEQ.gain.value = state.eqHigh;
+
+    // Compressor
+    const compressorNode = context.createDynamicsCompressor();
+    if (state.compressorEnabled) {
+      compressorNode.threshold.value = state.compressorThreshold;
+      compressorNode.knee.value = state.compressorKnee;
+      compressorNode.ratio.value = state.compressorRatio;
+      compressorNode.attack.value = state.compressorAttack;
+      compressorNode.release.value = state.compressorRelease;
+    } else {
+      compressorNode.threshold.value = 0;
+      compressorNode.ratio.value = 1;
+    }
+
+    // Delay nodes
+    const delayNode = context.createDelay(2.0);
+    delayNode.delayTime.value = state.delayTime;
+
+    const feedbackGainNode = context.createGain();
+    feedbackGainNode.gain.value = state.delayFeedback;
+
+    const wetGainNode = context.createGain();
+    wetGainNode.gain.value = state.delayEnabled ? state.delayMix : 0.0;
+
+    const dryGainNode = context.createGain();
+    dryGainNode.gain.value = state.delayEnabled ? 1.0 - state.delayMix : 1.0;
+
     analyser.fftSize = normalizedOptions.fftSize;
     analyser.smoothingTimeConstant = normalizedOptions.smoothingTimeConstant;
     analyser.minDecibels = normalizedOptions.minDecibels;
@@ -745,13 +975,43 @@ export function useAudioProcessor(
     gainNode.gain.value = state.gain;
     filterNode.type = state.filterType;
     filterNode.frequency.value = state.filterFrequency;
-    filterNode.Q.value = 0.72;
+    filterNode.Q.value = state.filterQ;
+
+    // Series connections for the main path
+    gainNode.connect(filterNode);
+    filterNode.connect(lowEQ);
+    lowEQ.connect(midEQ);
+    midEQ.connect(highEQ);
+    highEQ.connect(compressorNode);
+
+    // Dry/Wet split for Delay
+    compressorNode.connect(dryGainNode);
+    compressorNode.connect(delayNode);
+
+    // Delay Feedback Loop
+    delayNode.connect(feedbackGainNode);
+    feedbackGainNode.connect(delayNode);
+
+    // Wet path connection
+    delayNode.connect(wetGainNode);
+
+    // Combine back to Analyser
+    dryGainNode.connect(analyser);
+    wetGainNode.connect(analyser);
 
     graphRef.current = {
       context,
       analyser,
       gainNode,
       filterNode,
+      lowEQ,
+      midEQ,
+      highEQ,
+      compressorNode,
+      delayNode,
+      feedbackGainNode,
+      wetGainNode,
+      dryGainNode,
     };
 
     setState((previousState) => ({
@@ -769,7 +1029,21 @@ export function useAudioProcessor(
     startAnimation,
     state.filterFrequency,
     state.filterType,
+    state.filterQ,
     state.gain,
+    state.eqLow,
+    state.eqMid,
+    state.eqHigh,
+    state.compressorEnabled,
+    state.compressorThreshold,
+    state.compressorKnee,
+    state.compressorRatio,
+    state.compressorAttack,
+    state.compressorRelease,
+    state.delayEnabled,
+    state.delayTime,
+    state.delayFeedback,
+    state.delayMix,
   ]);
 
   const wireSource = useCallback((sourceNode: AudioNode, routeToSpeakers: boolean) => {
@@ -779,9 +1053,9 @@ export function useAudioProcessor(
     }
 
     disconnectSource();
+    stopGenerator();
+
     sourceNode.connect(graph.gainNode);
-    graph.gainNode.connect(graph.filterNode);
-    graph.filterNode.connect(graph.analyser);
 
     if (routeToSpeakers) {
       graph.analyser.connect(graph.context.destination);
@@ -790,7 +1064,7 @@ export function useAudioProcessor(
     }
 
     sourceNodeRef.current = sourceNode;
-  }, [disconnectSource]);
+  }, [disconnectSource, stopGenerator]);
 
   const startMicrophone = useCallback(async () => {
     await initialize();
@@ -801,6 +1075,7 @@ export function useAudioProcessor(
     }
 
     stopMicrophone();
+    stopGenerator();
     playbackOffsetRef.current = 0;
     modeRef.current = "microphone";
 
@@ -835,7 +1110,82 @@ export function useAudioProcessor(
       }));
       updatePlayingState(false);
     }
-  }, [initialize, startAnimation, stopMicrophone, updatePlayingState, wireSource]);
+  }, [initialize, startAnimation, stopMicrophone, stopGenerator, updatePlayingState, wireSource]);
+
+  const startGenerator = useCallback(async () => {
+    await initialize();
+
+    const graph = graphRef.current;
+    if (!graph) {
+      return;
+    }
+
+    stopMicrophone();
+    stopGenerator();
+    disconnectSource();
+    playbackOffsetRef.current = 0;
+    modeRef.current = "generator";
+
+    try {
+      const generatorGain = graph.context.createGain();
+      generatorGain.gain.value = state.generatorVolume;
+      generatorGainNodeRef.current = generatorGain;
+
+      let sourceNode: AudioNode;
+
+      if (state.generatorType === "white_noise") {
+        const buffer = createWhiteNoiseBuffer(graph.context);
+        const bufferSource = graph.context.createBufferSource();
+        bufferSource.buffer = buffer;
+        bufferSource.loop = true;
+        bufferSource.connect(generatorGain);
+        sourceNode = bufferSource;
+        generatorSourceRef.current = bufferSource;
+        bufferSource.start(0);
+      } else {
+        const osc = graph.context.createOscillator();
+        osc.type = state.generatorType as OscillatorType;
+        osc.frequency.value = state.generatorFrequency;
+        osc.connect(generatorGain);
+        sourceNode = osc;
+        generatorSourceRef.current = osc;
+        osc.start(0);
+      }
+
+      // Route the generator output through input gain node
+      wireSource(generatorGain, true);
+      updatePlayingState(true);
+      setState((previousState) => ({
+        ...previousState,
+        inputMode: "generator",
+        generatorEnabled: true,
+        currentTime: 0,
+        rmsMinDb: METER_FLOOR_DB,
+        rmsAverageDb: METER_FLOOR_DB,
+        rmsMaxDb: METER_FLOOR_DB,
+        rmsSampleCount: 0,
+        error: null,
+      }));
+      startAnimation();
+    } catch {
+      setState((previousState) => ({
+        ...previousState,
+        error: "Fehler beim Starten des Signalgenerators.",
+      }));
+      updatePlayingState(false);
+    }
+  }, [
+    initialize,
+    startAnimation,
+    stopMicrophone,
+    stopGenerator,
+    disconnectSource,
+    state.generatorType,
+    state.generatorFrequency,
+    state.generatorVolume,
+    updatePlayingState,
+    wireSource,
+  ]);
 
   const loadAudioFile = useCallback(
     async (file: File) => {
@@ -855,6 +1205,7 @@ export function useAudioProcessor(
       try {
         disconnectSource();
         stopMicrophone();
+        stopGenerator();
         loadedFileRef.current = null;
 
         const audioData = await file.arrayBuffer();
@@ -902,7 +1253,7 @@ export function useAudioProcessor(
         }));
       }
     },
-    [disconnectSource, initialize, stopMicrophone, updatePlayingState],
+    [disconnectSource, initialize, stopMicrophone, stopGenerator, updatePlayingState],
   );
 
   const downloadFilteredFile = useCallback(async () => {
@@ -932,15 +1283,72 @@ export function useAudioProcessor(
       const gainNode = offlineContext.createGain();
       const filterNode = offlineContext.createBiquadFilter();
 
+      // Offline EQ Filter Nodes
+      const lowEQ = offlineContext.createBiquadFilter();
+      lowEQ.type = "lowshelf";
+      lowEQ.frequency.value = 200;
+      lowEQ.gain.value = state.eqLow;
+
+      const midEQ = offlineContext.createBiquadFilter();
+      midEQ.type = "peaking";
+      midEQ.frequency.value = 1000;
+      midEQ.Q.value = 1.0;
+      midEQ.gain.value = state.eqMid;
+
+      const highEQ = offlineContext.createBiquadFilter();
+      highEQ.type = "highshelf";
+      highEQ.frequency.value = 5000;
+      highEQ.gain.value = state.eqHigh;
+
+      // Offline Compressor
+      const compressorNode = offlineContext.createDynamicsCompressor();
+      if (state.compressorEnabled) {
+        compressorNode.threshold.value = state.compressorThreshold;
+        compressorNode.knee.value = state.compressorKnee;
+        compressorNode.ratio.value = state.compressorRatio;
+        compressorNode.attack.value = state.compressorAttack;
+        compressorNode.release.value = state.compressorRelease;
+      } else {
+        compressorNode.threshold.value = 0;
+        compressorNode.ratio.value = 1;
+      }
+
+      // Offline Delay
+      const delayNode = offlineContext.createDelay(2.0);
+      delayNode.delayTime.value = state.delayTime;
+
+      const feedbackGainNode = offlineContext.createGain();
+      feedbackGainNode.gain.value = state.delayFeedback;
+
+      const wetGainNode = offlineContext.createGain();
+      wetGainNode.gain.value = state.delayEnabled ? state.delayMix : 0.0;
+
+      const dryGainNode = offlineContext.createGain();
+      dryGainNode.gain.value = state.delayEnabled ? 1.0 - state.delayMix : 1.0;
+
       sourceNode.buffer = loadedFile.buffer;
       gainNode.gain.value = state.gain;
       filterNode.type = state.filterType;
       filterNode.frequency.value = state.filterFrequency;
-      filterNode.Q.value = 0.72;
+      filterNode.Q.value = state.filterQ;
 
       sourceNode.connect(gainNode);
       gainNode.connect(filterNode);
-      filterNode.connect(offlineContext.destination);
+      filterNode.connect(lowEQ);
+      lowEQ.connect(midEQ);
+      midEQ.connect(highEQ);
+      highEQ.connect(compressorNode);
+
+      compressorNode.connect(dryGainNode);
+      compressorNode.connect(delayNode);
+
+      delayNode.connect(feedbackGainNode);
+      feedbackGainNode.connect(delayNode);
+      delayNode.connect(wetGainNode);
+
+      dryGainNode.connect(offlineContext.destination);
+      wetGainNode.connect(offlineContext.destination);
+
       sourceNode.start(0);
 
       const renderedBuffer = await offlineContext.startRendering();
@@ -971,7 +1379,25 @@ export function useAudioProcessor(
         error: "Der gefilterte Datei-Export konnte nicht erstellt werden.",
       }));
     }
-  }, [state.filterFrequency, state.filterType, state.gain]);
+  }, [
+    state.filterFrequency,
+    state.filterType,
+    state.filterQ,
+    state.gain,
+    state.eqLow,
+    state.eqMid,
+    state.eqHigh,
+    state.compressorEnabled,
+    state.compressorThreshold,
+    state.compressorKnee,
+    state.compressorRatio,
+    state.compressorAttack,
+    state.compressorRelease,
+    state.delayEnabled,
+    state.delayTime,
+    state.delayFeedback,
+    state.delayMix,
+  ]);
 
   const playFile = useCallback(async () => {
     await initialize();
@@ -989,6 +1415,7 @@ export function useAudioProcessor(
 
     disconnectSource();
     stopMicrophone();
+    stopGenerator();
 
     const sourceNode = graph.context.createBufferSource();
     sourceNode.buffer = loadedFile.buffer;
@@ -1013,7 +1440,15 @@ export function useAudioProcessor(
     sourceNode.start(0, safeOffset);
     updatePlayingState(true);
     startAnimation();
-  }, [disconnectSource, initialize, startAnimation, stopMicrophone, updatePlayingState, wireSource]);
+  }, [
+    disconnectSource,
+    initialize,
+    startAnimation,
+    stopMicrophone,
+    stopGenerator,
+    updatePlayingState,
+    wireSource,
+  ]);
 
   const pauseFile = useCallback(() => {
     const graph = graphRef.current;
@@ -1037,6 +1472,7 @@ export function useAudioProcessor(
     updatePlayingState(false);
     disconnectSource();
     stopMicrophone();
+    stopGenerator();
     setState((previousState) => ({
       ...previousState,
       currentTime: 0,
@@ -1052,7 +1488,7 @@ export function useAudioProcessor(
       rmsMaxDb: METER_FLOOR_DB,
       rmsSampleCount: 0,
     }));
-  }, [disconnectSource, stopMicrophone, updatePlayingState]);
+  }, [disconnectSource, stopMicrophone, stopGenerator, updatePlayingState]);
 
   const setInputMode = useCallback(
     (inputMode: AudioInputMode) => {
@@ -1065,11 +1501,13 @@ export function useAudioProcessor(
 
       if (inputMode === "microphone") {
         void startMicrophone();
+      } else if (inputMode === "generator") {
+        void startGenerator();
       } else {
         stop();
       }
     },
-    [startMicrophone, stop],
+    [startMicrophone, startGenerator, stop],
   );
 
   const setGain = useCallback((gain: number) => {
@@ -1121,6 +1559,373 @@ export function useAudioProcessor(
     }));
   }, []);
 
+  const setFilterQ = useCallback((q: number) => {
+    const normalizedQ = clamp(q, 0.1, 18);
+    const graph = graphRef.current;
+
+    if (graph) {
+      graph.filterNode.Q.setTargetAtTime(
+        normalizedQ,
+        graph.context.currentTime,
+        0.015,
+      );
+    }
+
+    setState((previousState) => ({
+      ...previousState,
+      filterQ: normalizedQ,
+    }));
+  }, []);
+
+  const setEqLow = useCallback((gain: number) => {
+    const normalizedGain = clamp(gain, -12, 12);
+    const graph = graphRef.current;
+
+    if (graph) {
+      graph.lowEQ.gain.setTargetAtTime(
+        normalizedGain,
+        graph.context.currentTime,
+        0.015,
+      );
+    }
+
+    setState((previousState) => ({
+      ...previousState,
+      eqLow: normalizedGain,
+    }));
+  }, []);
+
+  const setEqMid = useCallback((gain: number) => {
+    const normalizedGain = clamp(gain, -12, 12);
+    const graph = graphRef.current;
+
+    if (graph) {
+      graph.midEQ.gain.setTargetAtTime(
+        normalizedGain,
+        graph.context.currentTime,
+        0.015,
+      );
+    }
+
+    setState((previousState) => ({
+      ...previousState,
+      eqMid: normalizedGain,
+    }));
+  }, []);
+
+  const setEqHigh = useCallback((gain: number) => {
+    const normalizedGain = clamp(gain, -12, 12);
+    const graph = graphRef.current;
+
+    if (graph) {
+      graph.highEQ.gain.setTargetAtTime(
+        normalizedGain,
+        graph.context.currentTime,
+        0.015,
+      );
+    }
+
+    setState((previousState) => ({
+      ...previousState,
+      eqHigh: normalizedGain,
+    }));
+  }, []);
+
+  const setCompressorEnabled = useCallback((enabled: boolean) => {
+    setState((previousState) => {
+      const graph = graphRef.current;
+      if (graph) {
+        if (enabled) {
+          graph.compressorNode.threshold.setTargetAtTime(
+            previousState.compressorThreshold,
+            graph.context.currentTime,
+            0.015,
+          );
+          graph.compressorNode.knee.setTargetAtTime(
+            previousState.compressorKnee,
+            graph.context.currentTime,
+            0.015,
+          );
+          graph.compressorNode.ratio.setTargetAtTime(
+            previousState.compressorRatio,
+            graph.context.currentTime,
+            0.015,
+          );
+          graph.compressorNode.attack.setTargetAtTime(
+            previousState.compressorAttack,
+            graph.context.currentTime,
+            0.015,
+          );
+          graph.compressorNode.release.setTargetAtTime(
+            previousState.compressorRelease,
+            graph.context.currentTime,
+            0.015,
+          );
+        } else {
+          graph.compressorNode.threshold.setTargetAtTime(0, graph.context.currentTime, 0.015);
+          graph.compressorNode.ratio.setTargetAtTime(1, graph.context.currentTime, 0.015);
+        }
+      }
+      return {
+        ...previousState,
+        compressorEnabled: enabled,
+      };
+    });
+  }, []);
+
+  const setCompressorThreshold = useCallback((threshold: number) => {
+    const val = clamp(threshold, -60, 0);
+    const graph = graphRef.current;
+
+    if (graph && state.compressorEnabled) {
+      graph.compressorNode.threshold.setTargetAtTime(
+        val,
+        graph.context.currentTime,
+        0.015,
+      );
+    }
+
+    setState((previousState) => ({
+      ...previousState,
+      compressorThreshold: val,
+    }));
+  }, [state.compressorEnabled]);
+
+  const setCompressorKnee = useCallback((knee: number) => {
+    const val = clamp(knee, 0, 40);
+    const graph = graphRef.current;
+
+    if (graph && state.compressorEnabled) {
+      graph.compressorNode.knee.setTargetAtTime(
+        val,
+        graph.context.currentTime,
+        0.015,
+      );
+    }
+
+    setState((previousState) => ({
+      ...previousState,
+      compressorKnee: val,
+    }));
+  }, [state.compressorEnabled]);
+
+  const setCompressorRatio = useCallback((ratio: number) => {
+    const val = clamp(ratio, 1, 20);
+    const graph = graphRef.current;
+
+    if (graph && state.compressorEnabled) {
+      graph.compressorNode.ratio.setTargetAtTime(
+        val,
+        graph.context.currentTime,
+        0.015,
+      );
+    }
+
+    setState((previousState) => ({
+      ...previousState,
+      compressorRatio: val,
+    }));
+  }, [state.compressorEnabled]);
+
+  const setCompressorAttack = useCallback((attack: number) => {
+    const val = clamp(attack, 0.001, 1.0);
+    const graph = graphRef.current;
+
+    if (graph && state.compressorEnabled) {
+      graph.compressorNode.attack.setTargetAtTime(
+        val,
+        graph.context.currentTime,
+        0.015,
+      );
+    }
+
+    setState((previousState) => ({
+      ...previousState,
+      compressorAttack: val,
+    }));
+  }, [state.compressorEnabled]);
+
+  const setCompressorRelease = useCallback((release: number) => {
+    const val = clamp(release, 0.01, 3.0);
+    const graph = graphRef.current;
+
+    if (graph && state.compressorEnabled) {
+      graph.compressorNode.release.setTargetAtTime(
+        val,
+        graph.context.currentTime,
+        0.015,
+      );
+    }
+
+    setState((previousState) => ({
+      ...previousState,
+      compressorRelease: val,
+    }));
+  }, [state.compressorEnabled]);
+
+  const setDelayEnabled = useCallback((enabled: boolean) => {
+    setState((previousState) => {
+      const graph = graphRef.current;
+      if (graph) {
+        if (enabled) {
+          graph.dryGainNode.gain.setTargetAtTime(
+            1.0 - previousState.delayMix,
+            graph.context.currentTime,
+            0.015,
+          );
+          graph.wetGainNode.gain.setTargetAtTime(
+            previousState.delayMix,
+            graph.context.currentTime,
+            0.015,
+          );
+        } else {
+          graph.dryGainNode.gain.setTargetAtTime(1.0, graph.context.currentTime, 0.015);
+          graph.wetGainNode.gain.setTargetAtTime(0.0, graph.context.currentTime, 0.015);
+        }
+      }
+      return {
+        ...previousState,
+        delayEnabled: enabled,
+      };
+    });
+  }, []);
+
+  const setDelayTime = useCallback((time: number) => {
+    const val = clamp(time, 0.0, 2.0);
+    const graph = graphRef.current;
+
+    if (graph) {
+      graph.delayNode.delayTime.setTargetAtTime(
+        val,
+        graph.context.currentTime,
+        0.015,
+      );
+    }
+
+    setState((previousState) => ({
+      ...previousState,
+      delayTime: val,
+    }));
+  }, []);
+
+  const setDelayFeedback = useCallback((feedback: number) => {
+    const val = clamp(feedback, 0.0, 0.95);
+    const graph = graphRef.current;
+
+    if (graph) {
+      graph.feedbackGainNode.gain.setTargetAtTime(
+        val,
+        graph.context.currentTime,
+        0.015,
+      );
+    }
+
+    setState((previousState) => ({
+      ...previousState,
+      delayFeedback: val,
+    }));
+  }, []);
+
+  const setDelayMix = useCallback((mix: number) => {
+    const val = clamp(mix, 0.0, 1.0);
+    setState((previousState) => {
+      const graph = graphRef.current;
+      if (graph && previousState.delayEnabled) {
+        graph.dryGainNode.gain.setTargetAtTime(
+          1.0 - val,
+          graph.context.currentTime,
+          0.015,
+        );
+        graph.wetGainNode.gain.setTargetAtTime(
+          val,
+          graph.context.currentTime,
+          0.015,
+        );
+      }
+      return {
+        ...previousState,
+        delayMix: val,
+      };
+    });
+  }, []);
+
+  const setGeneratorEnabled = useCallback((enabled: boolean) => {
+    if (enabled) {
+      void startGenerator();
+    } else {
+      stopGenerator();
+      updatePlayingState(false);
+      setState((prev) => ({ ...prev, generatorEnabled: false }));
+    }
+  }, [startGenerator, stopGenerator, updatePlayingState]);
+
+  const setGeneratorType = useCallback((type: GeneratorType) => {
+    setState((previousState) => {
+      const newState = {
+        ...previousState,
+        generatorType: type,
+      };
+
+      if (previousState.inputMode === "generator" && isPlayingRef.current) {
+        setTimeout(() => {
+          void startGenerator();
+        }, 0);
+      }
+
+      return newState;
+    });
+  }, [startGenerator]);
+
+  const setGeneratorFrequency = useCallback((frequency: number) => {
+    const val = clamp(frequency, 40, 20_000);
+    const graph = graphRef.current;
+
+    if (graph && generatorSourceRef.current && state.generatorType !== "white_noise") {
+      const osc = generatorSourceRef.current as OscillatorNode;
+      osc.frequency.setTargetAtTime(val, graph.context.currentTime, 0.01);
+    }
+
+    setState((previousState) => ({
+      ...previousState,
+      generatorFrequency: val,
+    }));
+  }, [state.generatorType]);
+
+  const setGeneratorVolume = useCallback((volume: number) => {
+    const val = clamp(volume, 0.0, 1.0);
+    const graph = graphRef.current;
+    if (graph && generatorGainNodeRef.current) {
+      generatorGainNodeRef.current.gain.setTargetAtTime(val, graph.context.currentTime, 0.015);
+    }
+    setState((previousState) => ({
+      ...previousState,
+      generatorVolume: val,
+    }));
+  }, []);
+
+  const setFftSize = useCallback((size: number) => {
+    const graph = graphRef.current;
+    if (graph) {
+      graph.analyser.fftSize = size;
+    }
+    setState((previousState) => ({
+      ...previousState,
+      fftSize: size,
+    }));
+  }, []);
+
+  const setSmoothing = useCallback((smoothing: number) => {
+    const val = clamp(smoothing, 0, 0.95);
+    const graph = graphRef.current;
+    if (graph) {
+      graph.analyser.smoothingTimeConstant = val;
+    }
+    setState((previousState) => ({
+      ...previousState,
+      smoothing: val,
+    }));
+  }, []);
+
   useEffect(() => {
     writeStoredAudioSettings(state);
   }, [
@@ -1129,8 +1934,27 @@ export function useAudioProcessor(
     state.fileType,
     state.filterFrequency,
     state.filterType,
+    state.filterQ,
     state.gain,
     state.inputMode,
+    state.eqLow,
+    state.eqMid,
+    state.eqHigh,
+    state.compressorEnabled,
+    state.compressorThreshold,
+    state.compressorKnee,
+    state.compressorRatio,
+    state.compressorAttack,
+    state.compressorRelease,
+    state.delayEnabled,
+    state.delayTime,
+    state.delayFeedback,
+    state.delayMix,
+    state.generatorType,
+    state.generatorFrequency,
+    state.generatorVolume,
+    state.fftSize,
+    state.smoothing,
   ]);
 
   useEffect(() => {
@@ -1138,12 +1962,13 @@ export function useAudioProcessor(
       stopAnimation();
       disconnectSource();
       stopMicrophone();
+      stopGenerator();
 
       if (graphRef.current) {
         void graphRef.current.context.close();
       }
     };
-  }, [disconnectSource, stopAnimation, stopMicrophone]);
+  }, [disconnectSource, stopAnimation, stopMicrophone, stopGenerator]);
 
   const refs = useMemo<AudioProcessorRefs>(
     () => ({
@@ -1167,6 +1992,26 @@ export function useAudioProcessor(
       setGain,
       setFilterType,
       setFilterFrequency,
+      setFilterQ,
+      setEqLow,
+      setEqMid,
+      setEqHigh,
+      setCompressorEnabled,
+      setCompressorThreshold,
+      setCompressorKnee,
+      setCompressorRatio,
+      setCompressorAttack,
+      setCompressorRelease,
+      setDelayEnabled,
+      setDelayTime,
+      setDelayFeedback,
+      setDelayMix,
+      setGeneratorEnabled,
+      setGeneratorType,
+      setGeneratorFrequency,
+      setGeneratorVolume,
+      setFftSize,
+      setSmoothing,
     }),
     [
       downloadFilteredFile,
@@ -1176,10 +2021,30 @@ export function useAudioProcessor(
       playFile,
       setFilterFrequency,
       setFilterType,
+      setFilterQ,
       setGain,
       setInputMode,
       startMicrophone,
       stop,
+      setEqLow,
+      setEqMid,
+      setEqHigh,
+      setCompressorEnabled,
+      setCompressorThreshold,
+      setCompressorKnee,
+      setCompressorRatio,
+      setCompressorAttack,
+      setCompressorRelease,
+      setDelayEnabled,
+      setDelayTime,
+      setDelayFeedback,
+      setDelayMix,
+      setGeneratorEnabled,
+      setGeneratorType,
+      setGeneratorFrequency,
+      setGeneratorVolume,
+      setFftSize,
+      setSmoothing,
     ],
   );
 
