@@ -151,7 +151,7 @@ export default function AudioVisualizerDashboard() {
         <header className="flex flex-col justify-between gap-5 rounded-[2rem] border border-white/10 bg-white/[0.04] p-6 shadow-glow backdrop-blur-xl lg:flex-row lg:items-center">
           <div>
             <p className="mb-3 inline-flex rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.32em] text-cyan-200">
-              Reson8 Studio
+              Reson8
             </p>
             <h1 className="text-3xl font-black tracking-tight text-white sm:text-5xl">
               Web Audio Analyzer
@@ -163,22 +163,6 @@ export default function AudioVisualizerDashboard() {
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={controls.initialize}
-              className="rounded-2xl bg-cyan-300 px-5 py-3 text-sm font-bold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:bg-cyan-200 focus:outline-none focus:ring-2 focus:ring-cyan-200 focus:ring-offset-2 focus:ring-offset-slate-950"
-            >
-              {state.isInitialized ? "Audio Engine aktiv" : "Audio Engine starten"}
-            </button>
-            <button
-              type="button"
-              onClick={controls.stop}
-              className="rounded-2xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-bold text-slate-200 transition hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-slate-400 focus:ring-offset-2 focus:ring-offset-slate-950"
-            >
-              Stop
-            </button>
-          </div>
         </header>
 
         {state.error && (
@@ -233,9 +217,6 @@ export default function AudioVisualizerDashboard() {
                     Circular Time Domain
                   </p>
                 </div>
-                <span className="rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1 text-xs font-bold text-cyan-100">
-                  RMS {formatDb(state.levelDb)}
-                </span>
               </div>
               <div className="flex justify-center">
                 <canvas
