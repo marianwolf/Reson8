@@ -287,52 +287,33 @@ function drawCircularOscillator(canvas: HTMLCanvasElement, waveformData: AudioBy
   canvasContext.fill();
 }
 
-function calculateRmsDb(waveformData: AudioByteData) {
-  let sumSquares = 0;
-
-  for (let index = 0; index < waveformData.length; index += 1) {
-    const centeredSample = (waveformData[index] - 128) / 128;
-    sumSquares += centeredSample * centeredSample;
-  }
-
-  const rms = Math.sqrt(sumSquares / waveformData.length);
-  return rms > 0 ? Math.max(METER_FLOOR_DB, 20 * Math.log10(rms)) : METER_FLOOR_DB;
-}
-
-function calculateCrestDb(waveformData: AudioByteData) {
+function calculateWaveformMetrics(waveformData: AudioByteData) {
   let sumSquares = 0;
   let peak = 0;
-
-  for (let index = 0; index < waveformData.length; index += 1) {
-    const centeredSample = Math.abs((waveformData[index] - 128) / 128);
-    peak = Math.max(peak, centeredSample);
-    sumSquares += centeredSample * centeredSample;
-  }
-
-  const rms = Math.sqrt(sumSquares / waveformData.length);
-
-  if (rms === 0 || peak === 0) {
-    return 0;
-  }
-
-  return 20 * Math.log10(peak / rms);
-}
-
-function calculateZeroCrossingRate(waveformData: AudioByteData) {
   let crossings = 0;
   let previousSample = waveformData[0] - 128;
 
-  for (let index = 1; index < waveformData.length; index += 1) {
-    const sample = waveformData[index] - 128;
+  for (let index = 0; index < waveformData.length; index += 1) {
+    const rawSample = waveformData[index] - 128;
+    const centeredSample = Math.abs(rawSample) / 128;
 
-    if ((previousSample < 0 && sample >= 0) || (previousSample >= 0 && sample < 0)) {
-      crossings += 1;
+    peak = Math.max(peak, centeredSample);
+    sumSquares += centeredSample * centeredSample;
+
+    if (index > 0) {
+      if ((previousSample < 0 && rawSample >= 0) || (previousSample >= 0 && rawSample < 0)) {
+        crossings += 1;
+      }
+      previousSample = rawSample;
     }
-
-    previousSample = sample;
   }
 
-  return waveformData.length > 1 ? crossings / (waveformData.length - 1) : 0;
+  const rms = Math.sqrt(sumSquares / waveformData.length);
+  const rmsDb = rms > 0 ? Math.max(METER_FLOOR_DB, 20 * Math.log10(rms)) : METER_FLOOR_DB;
+  const crestDb = (rms === 0 || peak === 0) ? 0 : 20 * Math.log10(peak / rms);
+  const zeroCrossingRate = waveformData.length > 1 ? crossings / (waveformData.length - 1) : 0;
+
+  return { rmsDb, crestDb, zeroCrossingRate };
 }
 
 function calculateFrequencyMetrics(frequencyData: AudioByteData, sampleRate: number) {
@@ -659,13 +640,11 @@ export function useAudioProcessor(
 
     if (now - lastStateUpdateRef.current > 33) {
       lastStateUpdateRef.current = now;
-      const levelDb = calculateRmsDb(waveformData);
+      const { rmsDb: levelDb, crestDb, zeroCrossingRate } = calculateWaveformMetrics(waveformData);
       const frequencyMetrics = calculateFrequencyMetrics(
         frequencyData,
         graph.context.sampleRate,
       );
-      const zeroCrossingRate = calculateZeroCrossingRate(waveformData);
-      const crestDb = calculateCrestDb(waveformData);
 
       setState((previousState) => {
         const currentTime =
