@@ -698,8 +698,58 @@ export function useAudioProcessor(
   const playbackOffsetRef = useRef(0);
   const initialStateRef = useRef<AudioProcessorState | null>(null);
 
+  // Refs for generator settings to avoid stale closures
+  const generatorTypeRef = useRef<GeneratorType>("sine");
+  const generatorFrequencyRef = useRef(440);
+  const generatorVolumeRef = useRef(0.2);
+
+  // Refs for audio settings to avoid stale closures in initialize and other callbacks
+  const audioSettingsRef = useRef({
+    gain: INITIAL_GAIN,
+    filterType: "lowpass" as FilterMode,
+    filterFrequency: INITIAL_FILTER_FREQUENCY,
+    filterQ: 0.72,
+    eqLow: 0,
+    eqMid: 0,
+    eqHigh: 0,
+    compressorEnabled: false,
+    compressorThreshold: -24,
+    compressorKnee: 30,
+    compressorRatio: 12,
+    compressorAttack: 0.003,
+    compressorRelease: 0.25,
+    delayEnabled: false,
+    delayTime: 0.3,
+    delayFeedback: 0.5,
+    delayMix: 0.3,
+  });
+
   if (!initialStateRef.current) {
     initialStateRef.current = createInitialState();
+    generatorTypeRef.current = initialStateRef.current.generatorType;
+    generatorFrequencyRef.current = initialStateRef.current.generatorFrequency;
+    generatorVolumeRef.current = initialStateRef.current.generatorVolume;
+
+    // Initialize audio settings ref with defaults
+    audioSettingsRef.current = {
+      gain: initialStateRef.current.gain,
+      filterType: initialStateRef.current.filterType,
+      filterFrequency: initialStateRef.current.filterFrequency,
+      filterQ: initialStateRef.current.filterQ,
+      eqLow: initialStateRef.current.eqLow,
+      eqMid: initialStateRef.current.eqMid,
+      eqHigh: initialStateRef.current.eqHigh,
+      compressorEnabled: initialStateRef.current.compressorEnabled,
+      compressorThreshold: initialStateRef.current.compressorThreshold,
+      compressorKnee: initialStateRef.current.compressorKnee,
+      compressorRatio: initialStateRef.current.compressorRatio,
+      compressorAttack: initialStateRef.current.compressorAttack,
+      compressorRelease: initialStateRef.current.compressorRelease,
+      delayEnabled: initialStateRef.current.delayEnabled,
+      delayTime: initialStateRef.current.delayTime,
+      delayFeedback: initialStateRef.current.delayFeedback,
+      delayMix: initialStateRef.current.delayMix,
+    };
   }
 
   const modeRef = useRef<AudioInputMode>(initialStateRef.current.inputMode);
@@ -709,19 +759,12 @@ export function useAudioProcessor(
 
   const normalizedOptions = useMemo(
     () => ({
-      fftSize: options.fftSize ?? state.fftSize,
-      smoothingTimeConstant: options.smoothingTimeConstant ?? state.smoothing,
+      fftSize: options.fftSize ?? DEFAULT_FFT_SIZE,
+      smoothingTimeConstant: options.smoothingTimeConstant ?? DEFAULT_SMOOTHING,
       minDecibels: options.minDecibels ?? MIN_DECIBELS,
       maxDecibels: options.maxDecibels ?? MAX_DECIBELS,
     }),
-    [
-      options.fftSize,
-      options.maxDecibels,
-      options.minDecibels,
-      options.smoothingTimeConstant,
-      state.fftSize,
-      state.smoothing,
-    ],
+    [options],
   );
 
   const stopAnimation = useCallback(() => {
@@ -921,6 +964,7 @@ export function useAudioProcessor(
     }
 
     const context = new AudioContextConstructor();
+    const settings = audioSettingsRef.current;
     const analyser = context.createAnalyser();
     const gainNode = context.createGain();
     const filterNode = context.createBiquadFilter();
@@ -929,27 +973,27 @@ export function useAudioProcessor(
     const lowEQ = context.createBiquadFilter();
     lowEQ.type = "lowshelf";
     lowEQ.frequency.value = 200;
-    lowEQ.gain.value = state.eqLow;
+    lowEQ.gain.value = settings.eqLow;
 
     const midEQ = context.createBiquadFilter();
     midEQ.type = "peaking";
     midEQ.frequency.value = 1000;
     midEQ.Q.value = 1.0;
-    midEQ.gain.value = state.eqMid;
+    midEQ.gain.value = settings.eqMid;
 
     const highEQ = context.createBiquadFilter();
     highEQ.type = "highshelf";
     highEQ.frequency.value = 5000;
-    highEQ.gain.value = state.eqHigh;
+    highEQ.gain.value = settings.eqHigh;
 
     // Compressor
     const compressorNode = context.createDynamicsCompressor();
-    if (state.compressorEnabled) {
-      compressorNode.threshold.value = state.compressorThreshold;
-      compressorNode.knee.value = state.compressorKnee;
-      compressorNode.ratio.value = state.compressorRatio;
-      compressorNode.attack.value = state.compressorAttack;
-      compressorNode.release.value = state.compressorRelease;
+    if (settings.compressorEnabled) {
+      compressorNode.threshold.value = settings.compressorThreshold;
+      compressorNode.knee.value = settings.compressorKnee;
+      compressorNode.ratio.value = settings.compressorRatio;
+      compressorNode.attack.value = settings.compressorAttack;
+      compressorNode.release.value = settings.compressorRelease;
     } else {
       compressorNode.threshold.value = 0;
       compressorNode.ratio.value = 1;
@@ -957,25 +1001,25 @@ export function useAudioProcessor(
 
     // Delay nodes
     const delayNode = context.createDelay(2.0);
-    delayNode.delayTime.value = state.delayTime;
+    delayNode.delayTime.value = settings.delayTime;
 
     const feedbackGainNode = context.createGain();
-    feedbackGainNode.gain.value = state.delayFeedback;
+    feedbackGainNode.gain.value = settings.delayFeedback;
 
     const wetGainNode = context.createGain();
-    wetGainNode.gain.value = state.delayEnabled ? state.delayMix : 0.0;
+    wetGainNode.gain.value = settings.delayEnabled ? settings.delayMix : 0.0;
 
     const dryGainNode = context.createGain();
-    dryGainNode.gain.value = state.delayEnabled ? 1.0 - state.delayMix : 1.0;
+    dryGainNode.gain.value = settings.delayEnabled ? 1.0 - settings.delayMix : 1.0;
 
     analyser.fftSize = normalizedOptions.fftSize;
     analyser.smoothingTimeConstant = normalizedOptions.smoothingTimeConstant;
     analyser.minDecibels = normalizedOptions.minDecibels;
     analyser.maxDecibels = normalizedOptions.maxDecibels;
-    gainNode.gain.value = state.gain;
-    filterNode.type = state.filterType;
-    filterNode.frequency.value = state.filterFrequency;
-    filterNode.Q.value = state.filterQ;
+    gainNode.gain.value = settings.gain;
+    filterNode.type = settings.filterType;
+    filterNode.frequency.value = settings.filterFrequency;
+    filterNode.Q.value = settings.filterQ;
 
     // Series connections for the main path
     gainNode.connect(filterNode);
@@ -1021,30 +1065,7 @@ export function useAudioProcessor(
     }));
 
     startAnimation();
-  }, [
-    normalizedOptions.fftSize,
-    normalizedOptions.maxDecibels,
-    normalizedOptions.minDecibels,
-    normalizedOptions.smoothingTimeConstant,
-    startAnimation,
-    state.filterFrequency,
-    state.filterType,
-    state.filterQ,
-    state.gain,
-    state.eqLow,
-    state.eqMid,
-    state.eqHigh,
-    state.compressorEnabled,
-    state.compressorThreshold,
-    state.compressorKnee,
-    state.compressorRatio,
-    state.compressorAttack,
-    state.compressorRelease,
-    state.delayEnabled,
-    state.delayTime,
-    state.delayFeedback,
-    state.delayMix,
-  ]);
+  }, [normalizedOptions]);
 
   const wireSource = useCallback((sourceNode: AudioNode, routeToSpeakers: boolean) => {
     const graph = graphRef.current;
@@ -1128,12 +1149,12 @@ export function useAudioProcessor(
 
     try {
       const generatorGain = graph.context.createGain();
-      generatorGain.gain.value = state.generatorVolume;
+      generatorGain.gain.value = generatorVolumeRef.current;
       generatorGainNodeRef.current = generatorGain;
 
       let sourceNode: AudioNode;
 
-      if (state.generatorType === "white_noise") {
+      if (generatorTypeRef.current === "white_noise") {
         const buffer = createWhiteNoiseBuffer(graph.context);
         const bufferSource = graph.context.createBufferSource();
         bufferSource.buffer = buffer;
@@ -1144,15 +1165,14 @@ export function useAudioProcessor(
         bufferSource.start(0);
       } else {
         const osc = graph.context.createOscillator();
-        osc.type = state.generatorType as OscillatorType;
-        osc.frequency.value = state.generatorFrequency;
+        osc.type = generatorTypeRef.current as OscillatorType;
+        osc.frequency.value = generatorFrequencyRef.current;
         osc.connect(generatorGain);
         sourceNode = osc;
         generatorSourceRef.current = osc;
         osc.start(0);
       }
 
-      // Route the generator output through input gain node
       wireSource(generatorGain, true);
       updatePlayingState(true);
       setState((previousState) => ({
@@ -1180,9 +1200,6 @@ export function useAudioProcessor(
     stopMicrophone,
     stopGenerator,
     disconnectSource,
-    state.generatorType,
-    state.generatorFrequency,
-    state.generatorVolume,
     updatePlayingState,
     wireSource,
   ]);
@@ -1860,6 +1877,7 @@ export function useAudioProcessor(
   }, [startGenerator, stopGenerator, updatePlayingState]);
 
   const setGeneratorType = useCallback((type: GeneratorType) => {
+    generatorTypeRef.current = type;
     setState((previousState) => {
       const newState = {
         ...previousState,
@@ -1878,9 +1896,10 @@ export function useAudioProcessor(
 
   const setGeneratorFrequency = useCallback((frequency: number) => {
     const val = clamp(frequency, 40, 20_000);
+    generatorFrequencyRef.current = val;
     const graph = graphRef.current;
 
-    if (graph && generatorSourceRef.current && state.generatorType !== "white_noise") {
+    if (graph && generatorSourceRef.current && generatorTypeRef.current !== "white_noise") {
       const osc = generatorSourceRef.current as OscillatorNode;
       osc.frequency.setTargetAtTime(val, graph.context.currentTime, 0.01);
     }
@@ -1889,10 +1908,11 @@ export function useAudioProcessor(
       ...previousState,
       generatorFrequency: val,
     }));
-  }, [state.generatorType]);
+  }, []);
 
   const setGeneratorVolume = useCallback((volume: number) => {
     const val = clamp(volume, 0.0, 1.0);
+    generatorVolumeRef.current = val;
     const graph = graphRef.current;
     if (graph && generatorGainNodeRef.current) {
       generatorGainNodeRef.current.gain.setTargetAtTime(val, graph.context.currentTime, 0.015);
